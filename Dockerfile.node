@@ -1,0 +1,100 @@
+# Node.js WebSocket Relay Dockerfile for Monarchs Chat System
+# Multi-stage build for production
+
+# ===================================================================
+# Build Stage
+# ===================================================================
+FROM node:20-alpine AS builder
+
+# Install build dependencies for native modules
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# ===================================================================
+# Production Stage
+# ===================================================================
+FROM node:20-alpine AS production
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    curl \
+    ca-certificates \
+    tini
+
+# Create non-root user for security
+RUN addgroup -g 1000 -S nodejs && \
+    adduser -u 1000 -S -G nodejs -s /bin/sh nodejs
+
+# Set working directory
+WORKDIR /home/nodejs
+
+# Copy package files
+COPY package*.json ./
+
+# Install production dependencies only
+RUN npm ci --only=production && \
+    npm cache clean --force
+
+# Copy application source
+COPY server.js ./
+COPY config.yaml ./
+
+# Set ownership
+RUN chown -R nodejs:nodejs /home/nodejs
+
+# Switch to non-root user
+USER nodejs
+
+# Expose WebSocket port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Environment variables
+ENV NODE_ENV=production
+ENV HOME=/home/nodejs
+
+# Use tini for proper signal handling
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start command
+CMD ["node", "server.js"]
+
+# Labels
+LABEL maintainer="Monarchs Team" \
+      version="2.0.0" \
+      description="Monarchs Chat System - Node.js WebSocket Relay"
+
+# ===================================================================
+# Development Stage (optional)
+# ===================================================================
+FROM builder AS development
+
+WORKDIR /app
+
+# Copy source code
+COPY server.js ./
+COPY config.yaml ./
+
+# Install all dependencies including dev
+RUN npm install
+
+# Expose ports
+EXPOSE 8080
+
+# Development command with hot reload
+CMD ["npm", "run", "dev"]
+

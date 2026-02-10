@@ -1,0 +1,73 @@
+{
+  "name": "monarchs-relay",
+  "version": "2.0.0",
+  "description": "Production WebSocket relay server for Monarchs Chat System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "lint": "eslint server.js",
+    "lint:fix": "eslint server.js --fix",
+    "security:audit": "npm audit --production",
+    "health": "curl http://localhost:8080/health",
+    "metrics": "curl http://localhost:8080/metrics"
+  },
+  "keywords": [
+    "websocket",
+    "chat",
+    "relay",
+    "erlang",
+    "otp",
+    "production"
+  ],
+  "author": "Monarchs Team",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.19.0",
+    "helmet": "^7.1.0",
+    "cors": "^2.8.5",
+    "express-rate-limit": "^7.1.5",
+    "pino": "^8.18.0",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "eslint": "^8.56.0",
+    "supertest": "^6.3.3"
+  },
+  "optionalDependencies": {
+    "pino-pretty": "^10.3.1"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coverageDirectory": "coverage",
+    "collectCoverageFrom": [
+      "server.js",
+      "!**/node_modules/**"
+    ],
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ]
+  },
+  "eslintConfig": {
+    "env": {
+      "node": true",
+      "es2022": true
+    },
+    "extends": "eslint:recommended",
+    "parserOptions": {
+      "ecmaVersion": "latest",
+      "sourceType": "module"
+    },
+    "rules": {
+      "no-console": "warn",
+      "no-unused-vars": "warn"
+    }
+  }
+}
+

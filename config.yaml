@@ -1,0 +1,158 @@
+# Monarchs Chat System - Production Configuration
+# All settings can be overridden with environment variables
+
+# Application Settings
+app:
+  name: "monarchs"
+  version: "2.0.0"
+  environment: "production"  # development, staging, production
+
+# Erlang Backend Configuration
+backend:
+  host: "0.0.0.0"
+  port: 5678
+  max_connections: 10000
+  accept_pool_size: 10
+  
+# Security Settings
+security:
+  # Password hashing (bcrypt cost factor)
+  bcrypt_cost: 12
+  # Session token expiry in seconds (1 hour default)
+  token_expiry: 3600
+  # Refresh token expiry in seconds (24 hours)
+  refresh_token_expiry: 86400
+  # Rate limiting
+  rate_limit:
+    # Max login attempts per window
+    max_attempts: 5
+    # Window duration in milliseconds
+    window_ms: 60000
+    # Ban duration in milliseconds after exceeding limit
+    ban_duration_ms: 300000
+  # Password requirements
+  password:
+    min_length: 8
+    max_length: 128
+    require_uppercase: true
+    require_lowercase: true
+    require_numbers: true
+    require_special: false
+  # Username requirements
+  username:
+    min_length: 3
+    max_length: 30
+    allowed_pattern: "^[a-zA-Z0-9_]+$"
+
+# WebSocket Relay Server Configuration
+relay:
+  host: "0.0.0.0"
+  port: 8080
+  # WebSocket path
+  path: "/ws"
+  # Heartbeat interval in milliseconds
+  heartbeat_interval: 30000
+  # Connection timeout in milliseconds
+  connection_timeout: 60000
+  # Max message size in bytes
+  max_payload_size: 65536
+  # Rate limiting
+  rate_limit:
+    # Max messages per second per connection
+    max_messages_per_second: 30
+    # Max connections per IP
+    max_connections_per_ip: 10
+
+# Logging Configuration
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, plain
+  output: "stdout"  # stdout, file
+  file:
+    path: "/var/log/monarchs"
+    max_size_mb: 100
+    max_files: 10
+  # Enable audit logging for security events
+  audit:
+    enabled: true
+    events:
+      - login
+      - logout
+      - register
+      - failed_login
+      - permission_denied
+
+# Data Persistence
+persistence:
+  # Enable persistence (future: database integration)
+  enabled: false
+  # In-memory storage settings
+  memory:
+    # Max users in memory
+    max_users: 100000
+    # Max rooms in memory
+    max_rooms: 10000
+    # Max messages per room
+    max_messages_per_room: 1000
+
+# Monitoring & Health Checks
+monitoring:
+  # Enable health endpoint
+  health:
+    enabled: true
+    path: "/health"
+  # Enable metrics endpoint
+  metrics:
+    enabled: true
+    path: "/metrics"
+    # Prometheus format
+    prometheus: true
+  # Enable pprof endpoints
+  pprof:
+    enabled: false
+    path: "/debug/pprof"
+
+# CORS Configuration (for Web API)
+cors:
+  enabled: true
+  origins:
+    - "*"  # In production, replace with specific domains
+  methods:
+    - "GET"
+    - "POST"
+    - "OPTIONS"
+  credentials: true
+  max_age: 86400
+
+# Session Management
+session:
+  # Cookie name
+  cookie_name: "monarchs_sid"
+  # Cookie settings
+  cookie:
+    secure: true  # HTTPS only
+    http_only: true
+    same_site: "strict"
+    max_age_seconds: 3600
+
+# Feature Flags
+features:
+  # Enable private messaging
+  private_messaging: true
+  # Enable room creation by users
+  user_room_creation: true
+  # Enable guest access
+  guest_access: false
+  # Enable message encryption (E2E)
+  end_to_end_encryption: false
+
+# Environment Variable Overrides
+# Format: ENV_VAR_NAME: config.path
+env_overrides:
+  - MONARCHS_PORT: backend.port
+  - MONARCHS_RELAY_PORT: relay.port
+  - MONARCHS_LOG_LEVEL: logging.level
+  - MONARCHS_TOKEN_SECRET: security.token_secret
+  - MONARCHS_DB_URL: persistence.database.url
+  - MONARCHS_REDIS_URL: persistence.redis.url
+

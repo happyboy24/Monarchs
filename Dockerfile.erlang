@@ -1,0 +1,79 @@
+# Erlang Backend Dockerfile for Monarchs Chat System
+# Multi-stage build for production
+
+# ===================================================================
+# Build Stage
+# ===================================================================
+FROM erlang:26-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    git \
+    build-base \
+    openssl-dev
+
+# Set working directory
+WORKDIR /app
+
+# Copy source code
+COPY src/ ./src/
+COPY config.yaml ./
+COPY monarchs_app.erl ./
+COPY monarchs_sup.erl ./
+COPY monarchs_server.erl ./
+COPY monarchs_config.erl ./
+COPY monarchs_user_sup.erl ./
+COPY monarchs_room_sup.erl ./
+COPY monarchs_connection_sup.erl ./
+COPY monarchs_connection.erl ./
+
+# Compile Erlang applications
+RUN erl -pa src -s monarchs_app -noshell -eval 'init:stop().' 2>/dev/null || true
+RUN erlc -o src src/*.erl
+
+# ===================================================================
+# Production Stage
+# ===================================================================
+FROM erlang:26-alpine AS production
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    openssl \
+    ca-certificates
+
+# Create non-root user for security
+RUN addgroup -g 1000 -S erlang && \
+    adduser -u 1000 -S -G erlang -s /bin/sh erlang
+
+# Set working directory
+WORKDIR /home/erlang
+
+# Copy compiled beam files from builder
+COPY --from=builder /app/src/*.beam /home/erlang/
+COPY --from=builder /app/config.yaml /home/erlang/
+
+# Set ownership
+RUN chown -R erlang:erlang /home/erlang
+
+# Switch to non-root user
+USER erlang
+
+# Expose backend port
+EXPOSE 5678
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD nc -z localhost 5678 || exit 1
+
+# Environment variables
+ENV HOME=/home/erlang
+ENV NODE_ENV=production
+
+# Start command
+CMD ["erl", "-pa", ".", "-s", "monarchs_app", "-noshell", "-detached"]
+
+# Labels
+LABEL maintainer="Monarchs Team" \
+      version="2.0.0" \
+      description="Monarchs Chat System - Erlang Backend"
+

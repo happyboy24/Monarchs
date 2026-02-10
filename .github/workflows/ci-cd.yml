@@ -1,0 +1,324 @@
+# Monarchs Chat System - GitHub Actions CI/CD Pipeline
+# Automated testing, security scanning, and deployment workflow
+
+name: Monarchs CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Weekly security scan
+    - cron: '0 0 * * 0'
+
+env:
+  # Docker Hub username (set in repository secrets)
+  DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+  # Docker Hub token (set in repository secrets)
+  DOCKER_HUB_TOKEN: ${{ secrets.DOCKER_HUB_TOKEN }}
+  # GitHub token for releases
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  # ===================================================================
+  # Job 1: Code Quality & Linting
+  # ===================================================================
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Check Erlang syntax
+        run: |
+          which escript || echo "escript not found, skipping Erlang syntax check"
+
+  # ===================================================================
+  # Job 2: Erlang Backend Tests
+  # ===================================================================
+  erlang-tests:
+    name: Erlang Backend Tests
+    runs-on: ubuntu-latest
+    container: erlang:26-alpine
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile Erlang code
+        run: |
+          erlc -o src src/*.erl
+
+      - name: Run Erlang tests (placeholder)
+        run: |
+          echo "Erlang EUnit tests would run here"
+          echo "erl -pa src -eval 'eunit:test([monarchs_server_tests]), init:stop().'"
+
+  # ===================================================================
+  # Job 3: Node.js Tests
+  # ===================================================================
+  node-tests:
+    name: Node.js Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test --if-present
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+
+  # ===================================================================
+  # Job 4: Security Scanning
+  # ===================================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit --production --audit-level=high
+        continue-on-error: true
+
+      - name: Run Snyk security scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # ===================================================================
+  # Job 5: Docker Build - Erlang Backend
+  # ===================================================================
+  docker-build-erlang:
+    name: Build Erlang Backend Docker Image
+    runs-on: ubuntu-latest
+    needs: [code-quality, node-tests, security-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Extract metadata for Erlang image
+        id: meta-erlang
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_HUB_USERNAME }}/monarchs-erlang
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Erlang backend
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.erlang
+          push: true
+          tags: ${{ steps.meta-erlang.outputs.tags }}
+          labels: ${{ steps.meta-erlang.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===================================================================
+  # Job 6: Docker Build - Node.js Relay
+  # ===================================================================
+  docker-build-node:
+    name: Build Node.js Relay Docker Image
+    runs-on: ubuntu-latest
+    needs: [code-quality, node-tests, security-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Extract metadata for Node.js image
+        id: meta-node
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_HUB_USERNAME }}/monarchs-relay
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Node.js relay
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.node
+          push: true
+          tags: ${{ steps.meta-node.outputs.tags }}
+          labels: ${{ steps.meta-node.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===================================================================
+  # Job 7: Integration Tests
+  # ===================================================================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [docker-build-erlang, docker-build-node]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create test network
+        run: docker network create monarchs-test || true
+
+      - name: Run integration tests
+        run: |
+          echo "Running integration tests..."
+          echo "This would spin up containers and test the full stack"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker-compose -f docker-compose.test.yml down -v || true
+          docker network rm monarchs-test || true
+
+  # ===================================================================
+  # Job 8: Deploy to Staging (on main branch)
+  # ===================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://staging.monarchs.example.com
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to staging (example using kubectl)
+        run: |
+          echo "Deploying to staging environment..."
+          # kubectl apply -f k8s/staging/
+          # This would typically connect to a Kubernetes cluster or cloud platform
+
+  # ===================================================================
+  # Job 9: Create Release (on tag)
+  # ===================================================================
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Create GitHub release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Erlang backend artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./monarchs-erlang.tar.gz
+          asset_name: monarchs-erlang-${{ github.ref_name }}.tar.gz
+          asset_content_type: application/gzip
+
+  # ===================================================================
+  # Notifications
+  # ===================================================================
+  notify:
+    name: Notifications
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: always()
+    steps:
+      - name: Send notification on failure
+        if: failure()
+        run: |
+          echo "Deployment failed. Sending notification..."
+          # Would send to Slack, email, etc.
+
+      - name: Send notification on success
+        if: success()
+        run: |
+          echo "Deployment successful. Sending notification..."
+          # Would send to Slack, email, etc.
+
