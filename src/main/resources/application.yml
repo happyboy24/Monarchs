@@ -1,0 +1,147 @@
+# Monarchs Chat System - Spring Boot Configuration
+# All settings can be overridden with environment variables
+
+spring:
+  application:
+    name: monarchs-chat
+  config:
+    import: optional:file:./config.yaml
+
+  # Database Configuration
+  datasource:
+    url: jdbc:h2:mem:monarchs;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+
+  # JPA Configuration
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: true
+
+  # H2 Console (development only)
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+# Server Configuration
+server:
+  port: ${MONARCHS_PORT:8080}
+  servlet:
+    context-path: /api
+
+# Application Custom Properties
+monarchs:
+  # Application Settings
+  app:
+    name: monarchs
+    version: 2.0.0
+    environment: ${MONARCHS_ENVIRONMENT:development}
+
+  # Backend Configuration (for WebSocket relay)
+  backend:
+    host: ${MONARCHS_BACKEND_HOST:0.0.0.0}
+    port: ${MONARCHS_BACKEND_PORT:5678}
+    max-connections: ${MONARCHS_MAX_CONNECTIONS:10000}
+
+  # Security Settings
+  security:
+    bcrypt-cost: ${MONARCHS_BCRYPT_COST:12}
+    token-expiry: ${MONARCHS_TOKEN_EXPIRY:3600}
+    refresh-token-expiry: ${MONARCHS_REFRESH_TOKEN_EXPIRY:86400}
+    token-secret: ${MONARCHS_TOKEN_SECRET:your-256-bit-secret-key-change-in-production}
+    max-login-attempts: ${MONARCHS_MAX_LOGIN_ATTEMPTS:5}
+    rate-limit-window-ms: ${MONARCHS_RATE_LIMIT_WINDOW:60000}
+    ban-duration-ms: ${MONARCHS_BAN_DURATION:300000}
+
+  # Password Requirements
+  password:
+    min-length: 8
+    max-length: 128
+    require-uppercase: true
+    require-lowercase: true
+    require-numbers: true
+    require-special: false
+
+  # Username Requirements
+  username:
+    min-length: 3
+    max-length: 30
+    pattern: "^[a-zA-Z0-9_]+$"
+
+  # WebSocket Configuration
+  websocket:
+    enabled: true
+    path: /ws
+    heartbeat-interval-ms: 30000
+    connection-timeout-ms: 60000
+    max-payload-size: 65536
+
+  # Logging Configuration
+  logging:
+    level: ${MONARCHS_LOG_LEVEL:info}
+    format: json
+    audit:
+      enabled: true
+
+  # Monitoring
+  monitoring:
+    health:
+      enabled: true
+      path: /health
+    metrics:
+      enabled: true
+      path: /metrics
+      prometheus: true
+
+  # CORS Configuration
+  cors:
+    enabled: true
+    allowed-origins: "*"
+    allowed-methods: "GET,POST,OPTIONS"
+    allow-credentials: true
+    max-age: 86400
+
+  # Feature Flags
+  features:
+    private-messaging: true
+    user-room-creation: true
+    guest-access: false
+    end-to-end-encryption: false
+
+  # Admin Configuration
+  admin:
+    enabled: true
+    admin-secret: ${MONARCHS_ADMIN_SECRET:monarchs_admin_secret_2024}
+
+# Logging
+logging:
+  level:
+    root: INFO
+    com.monarchs: DEBUG
+    org.springframework.security: INFO
+    org.hibernate.SQL: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# Management endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
