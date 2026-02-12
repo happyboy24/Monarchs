@@ -55,13 +55,14 @@ describe('Monarchs WebSocket Relay Server', () => {
                 iat: Date.now(),
                 exp: Date.now() + 3600000
             };
-            
+
             const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64url');
             const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
-            
+
             expect(encodedHeader).toBeDefined();
             expect(encodedPayload).toBeDefined();
-            expect(encodedHeader.split('.')).toHaveLength(3);
+            expect(encodedHeader).not.toContain('.');
+            expect(encodedPayload).not.toContain('.');
         });
         
         test('should verify valid token', () => {
@@ -202,9 +203,10 @@ describe('Monarchs WebSocket Relay Server', () => {
             const data = 'Available rooms:\n  - general\n  - random\n  - support';
             const rooms = data
                 .split('\n')
+                .filter(line => line.includes('  - '))
                 .map(r => r.replace(/^  - /, '').trim())
                 .filter(r => r);
-            
+
             expect(rooms).toEqual(['general', 'random', 'support']);
         });
     });

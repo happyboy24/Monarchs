@@ -667,8 +667,12 @@ async function handleMessage(ws, connectionId, data, state) {
     switch (data.type) {
         case 'register':
             const registerResult = await sendToErlang(`/register ${data.username} ${data.password}`);
-            setAuth(data.username, null, false);
-            ws.send(JSON.stringify({ type: 'success', content: 'Registration successful! Please login.' }));
+            if (registerResult.includes('Error:')) {
+                ws.send(JSON.stringify({ type: 'error', content: registerResult.replace('Error: ', '').trim() }));
+            } else {
+                setAuth(data.username, null, false);
+                ws.send(JSON.stringify({ type: 'success', content: 'Registration successful! Please login.' }));
+            }
             break;
             
         case 'login':
