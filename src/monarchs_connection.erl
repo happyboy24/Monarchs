@@ -21,6 +21,9 @@
     socket :: inet:socket() | undefined,
     peer_address :: tuple() | undefined,
     server_pid :: pid() | undefined,
+    username :: string() | undefined,
+    token :: string() | undefined,
+    current_room :: string() | undefined,
     recv_buffer = <<>> :: binary(),
     connected_at :: integer() | undefined,
     last_activity :: integer() | undefined
@@ -33,7 +36,6 @@ start_link(Socket, Options) ->
     gen_server:start_link(?MODULE, {Socket, Options}, []).
 
 init({Socket, _Options}) ->
-    %% Set process priority
     erlang:process_flag(priority, high),
     
     {ok, {Addr, Port}} = inet:peername(Socket),
@@ -41,17 +43,19 @@ init({Socket, _Options}) ->
     
     io:format("[CONNECTION] New TCP connection from ~p:~p~n", [Addr, Port]),
     
-    %% Send welcome message
     send_welcome(Socket),
     
     {ok, #state{
         socket = Socket,
         peer_address = {Addr, Port},
         server_pid = undefined,
+        username = undefined,
+        token = undefined,
+        current_room = undefined,
         recv_buffer = <<>>,
         connected_at = ConnectedAt,
         last_activity = ConnectedAt
-    }, 60000}. %% 60 second timeout
+    }, 60000}.
 
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
@@ -59,7 +63,6 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% Handle incoming data
 handle_info({tcp, Socket, Data}, State = #state{socket = Socket}) ->
     LastActivity = erlang:system_time(second),
     NewBuffer = <<(State#state.recv_buffer)/binary, Data/binary>>,
@@ -72,17 +75,14 @@ handle_info({tcp, Socket, Data}, State = #state{socket = Socket}) ->
             {stop, {error, Reason}, NewState}
     end;
 
-%% Handle socket close
 handle_info({tcp_closed, Socket}, State = #state{socket = Socket}) ->
     io:format("[CONNECTION] TCP connection closed~n"),
     {stop, normal, State};
 
-%% Handle socket error
 handle_info({tcp_error, Socket, Reason}, State = #state{socket = Socket}) ->
     io:format("[CONNECTION] TCP error: ~p~n", [Reason]),
     {stop, {tcp_error, Reason}, State};
 
-%% Handle timeout
 handle_info(timeout, State) ->
     io:format("[CONNECTION] Connection timeout (inactive)~n"),
     {stop, timeout, State};
@@ -100,10 +100,6 @@ terminate(_Reason, State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
-%% ===================================================================
-%% Internal Functions
-%% ===================================================================
 
 %% Process incoming data line by line
 process_data(Socket, Buffer, State) ->
@@ -123,7 +119,6 @@ process_data(Socket, Buffer, State) ->
                     {error, Reason, State}
             end;
         [_Incomplete] ->
-            %% Wait for more data
             {ok, Buffer, State}
     end.
 
@@ -135,7 +130,7 @@ handle_command(<<"/register ", Args/binary>>, State) ->
             PasswordStr = binary_to_list(Password),
             case monarchs_server:register_user(UsernameStr, PasswordStr) of
                 ok ->
-                    {ok, "Registration successful! Login with /login <username> <password>\n\n"};
+                    {ok, "Registration successful! You can now login with /login <username> <password>\n\n"};
                 {error, Reason} ->
                     {ok, "Error: " ++ Reason ++ "\n\n"}
             end;
@@ -183,37 +178,78 @@ handle_command(<<"/rooms">>, State) ->
             {ok, lists:flatten(Formatted)}
     end;
 
-handle_command(<<"/create ", RoomName/binary>>, State) ->
+handle_command(<<"/create ", RoomName/binary>>, State = #state{token = undefined}) ->
+    {ok, "Please login first with /login <username> <password>\n\n"};
+handle_command(<<"/create ", RoomName/binary>>, State = #state{token = Token}) ->
     RoomNameStr = binary_to_list(RoomName),
-    case monarchs_server:get_stats() of
-        #stats{} ->
-            %% This is a placeholder - real implementation would validate token
-            {ok, "Room creation requires authentication. Please login first.\n\n"};
-        _ ->
-            {ok, "Please login first.\n\n"}
+    case monarchs_server:create_room(Token, RoomNameStr) of
+        ok ->
+            {ok, "Room '" ++ RoomNameStr ++ "' created! Join with /join " ++ RoomNameStr ++ "\n\n"};
+        {error, Reason} ->
+            {ok, "Error: " ++ Reason ++ "\n\n"}
     end;
 
-handle_command(<<"/join ", RoomName/binary>>, State) ->
+handle_command(<<"/join ", RoomName/binary>>, State = #state{token = undefined}) ->
+    {ok, "Please login first with /login <username> <password>\n\n"};
+handle_command(<<"/join ", RoomName/binary>>, State = #state{token = Token}) ->
     RoomNameStr = binary_to_list(RoomName),
-    {ok, "Please login first.\n\n"};
+    case monarchs_server:join_room(Token, RoomNameStr) of
+        ok ->
+            {ok, "Joined room '" ++ RoomNameStr ++ "'! Start typing to chat!\n\n"};
+        {error, Reason} ->
+            {ok, "Error: " ++ Reason ++ "\n\n"}
+    end;
+
+handle_command(<<"/leave">>, State = #state{token = undefined}) ->
+    {ok, "Please login first\n\n"};
+handle_command(<<"/leave">>, State = #state{token = Token, current_room = undefined}) ->
+    {ok, "You are not in a room\n\n"};
+handle_command(<<"/leave">>, State = #state{token = Token, current_room = RoomName}) ->
+    case monarchs_server:leave_room(Token, RoomName) of
+        ok ->
+            {ok, "Left room '" ++ RoomName ++ "'\n\n"};
+        {error, Reason} ->
+            {ok, "Error: " ++ Reason ++ "\n\n"}
+    end;
 
 handle_command(<<"/users">>, State) ->
     Users = monarchs_server:get_users(),
     Formatted = io_lib:format("Registered users: ~p\n\n", [Users]),
     {ok, Formatted};
 
+handle_command(<<"/msg ", Args/binary>>, State = #state{token = undefined}) ->
+    {ok, "Please login first\n\n"};
+handle_command(<<"/msg ", Args/binary>>, State = #state{token = Token}) ->
+    case binary:split(Args, <<" ">>) of
+        [ToUser, Message] ->
+            ToUserStr = binary_to_list(ToUser),
+            MessageStr = binary_to_list(Message),
+            monarchs_server:send_private(Token, ToUserStr, MessageStr),
+            {ok, "PM sent to " ++ ToUserStr ++ "\n\n"};
+        _ ->
+            {ok, "Usage: /msg <username> <message>\n\n"}
+    end;
+
+handle_command(<<"/logout">>, State = #state{token = undefined}) ->
+    {ok, "Not logged in\n\n"};
+handle_command(<<"/logout">>, State = #state{token = Token}) ->
+    monarchs_server:logout(Token),
+    {ok, "Logged out successfully\n\n"};
+
 handle_command(<<"/help">>, State) ->
     HelpMsg = [
         "\n========= HELP =========\n",
         "Commands:\n",
-        "  /rooms               - List all rooms\n",
-        "  /create <room_name> - Create a new room\n",
-        "  /join <room_name>   - Join a room\n",
-        "  /leave              - Leave current room\n",
-        "  /users              - List registered users\n",
-        "  /msg <user> <msg>   - Send private message\n",
-        "  /logout             - Logout\n",
-        "  /quit               - Disconnect\n",
+        "  /register <user> <pass> - Register a new account\n",
+        "  /login <user> <pass>    - Login to your account\n",
+        "  /rooms                  - List all available rooms\n",
+        "  /create <room_name>    - Create a new room\n",
+        "  /join <room_name>      - Join a room\n",
+        "  /leave                 - Leave current room\n",
+        "  /users                 - List registered users\n",
+        "  /msg <user> <msg>      - Send private message\n",
+        "  /logout                - Logout\n",
+        "  /quit                  - Disconnect\n",
         "\nJust type to send messages to the current room!\n",
         "=========================\n\n"
     ],
@@ -225,15 +261,19 @@ handle_command(<<"/quit">>, State) ->
     gen_tcp:close(State#state.socket),
     {ok, stop};
 
-handle_command(<<>>, State) ->
+handle_command(<<>>, _State) ->
     {ok, "> "};
 
-handle_command(<<$/, _/binary>>, State) ->
+handle_command(<<$/, _/binary>>, _State) ->
     {ok, "Unknown command. Type /help for available commands\n\n"};
 
-%% Default: echo help message
-handle_command(_Data, State) ->
-    {ok, "Please login first. Type /help for available commands\n\n"}.
+handle_command(Message, State = #state{token = undefined}) ->
+    {ok, "Please login first. Type /help for available commands\n\n"};
+handle_command(Message, State = #state{token = Token, current_room = undefined}) ->
+    {ok, "Join a room first with /join <room_name>\n\n"};
+handle_command(Message, State = #state{token = Token, current_room = RoomName}) ->
+    monarchs_server:send_message(Token, RoomName, binary_to_list(Message)),
+    {ok, "> "}.
 
 %% Send welcome message
 send_welcome(Socket) ->

@@ -30,7 +30,8 @@
     created_at :: integer(),
     last_login :: integer() | undefined,
     status :: online | away | offline,
-    current_room :: string() | undefined
+    current_room :: string() | undefined,
+    socket :: inet:socket() | undefined
 }).
 
 -record(room, {
@@ -146,7 +147,7 @@ init([]) ->
     io:format("~n========================================~n", []),
     io:format("   MONARCHS CHAT SERVER v2.0.0~n", []),
     io:format("   Production Edition~n", []),
-   .========================================~n", []),
+    io:format("========================================~n", []),
     io:format("[SERVER] Starting on port ~p~n", [BackendPort]),
     io:format("[SERVER] Max connections: ~p~n", [MaxConnections]),
     
@@ -493,7 +494,7 @@ handle_cast({send_message, Token, RoomName, Message}, State) ->
         {error, _} ->
             {noreply, State};
         {ok, Username} ->
-            case ets:lookup(?ROOMS_TABLE, RoomName of
+            case ets:lookup(?ROOMS_TABLE, RoomName) of
                 [] ->
                     {noreply, State};
                 [{RoomName, Room}] ->
@@ -508,10 +509,10 @@ handle_cast({send_message, Token, RoomName, Message}, State) ->
                         room = RoomName,
                         sender = Username,
                         content = SanitizedMessage,
-                        timestamp = erlang:system_time(millisecond),
-                        type = room,
-                        metadata => #{}
-                    },
+                    timestamp = erlang:system_time(millisecond),
+                    type = room,
+                    metadata = #{}
+                },
                     
                     %% Store message
                     ets:insert(?MESSAGES_TABLE, {RoomName, Msg}),

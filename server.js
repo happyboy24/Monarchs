@@ -16,14 +16,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
-const https = require('https');
 const WebSocket = require('ws');
 const url = require('url');
-
-// Security middleware
-const helmet = require('helmet');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
 
 // Logging
 const pino = require('pino');
