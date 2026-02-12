@@ -146,6 +146,21 @@ features:
   # Enable message encryption (E2E)
   end_to_end_encryption: false
 
+# Admin Configuration
+admin:
+  # Enable admin system
+  enabled: true
+  # Admin secret for initial registration (change in production!)
+  admin_secret: "monarchs_admin_secret_2024"
+  # Roles hierarchy
+  roles:
+    - owner     # Can do everything including shutdown
+    - admin     # Can ban, kick, promote, demote
+    - moderator # Can kick users from rooms
+    - user      # Regular user
+  # Default admin role for first registered user
+  first_admin_is_owner: true
+
 # Environment Variable Overrides
 # Format: ENV_VAR_NAME: config.path
 env_overrides:
@@ -155,4 +170,5 @@ env_overrides:
   - MONARCHS_TOKEN_SECRET: security.token_secret
   - MONARCHS_DB_URL: persistence.database.url
   - MONARCHS_REDIS_URL: persistence.redis.url
+  - MONARCHS_ADMIN_SECRET: admin.admin_secret
 

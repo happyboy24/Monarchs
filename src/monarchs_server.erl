@@ -14,7 +14,11 @@
     create_room/2, join_room/2, leave_room/2,
     send_message/3, send_private/3,
     get_rooms/0, get_users/0, get_room_users/1,
-    get_stats/0, health_check/0
+    get_stats/0, health_check/0,
+    %% Admin API
+    register_admin/2, promote/3, demote/2, ban/3, unban/1, kick/2,
+    get_user_info/1, get_online_users/0, get_banned_users/0,
+    shutdown/1, broadcast/2
 ]).
 
 %% Constants
@@ -31,7 +35,11 @@
     last_login :: integer() | undefined,
     status :: online | away | offline,
     current_room :: string() | undefined,
-    socket :: inet:socket() | undefined
+    socket :: inet:socket() | undefined,
+    role :: user | moderator | admin | owner,
+    banned :: boolean(),
+    ban_reason :: string() | undefined,
+    ban_expires :: integer() | undefined
 }).
 
 -record(room, {
@@ -80,6 +88,10 @@
 -define(ROOMS_TABLE, monarchs_rooms).
 -define(MESSAGES_TABLE, monarchs_messages).
 -define(SESSIONS_TABLE, monarchs_sessions).
+-define(BANNED_TABLE, monarchs_banned).
+
+%% Admin secret for initial setup (change in production!)
+-define(ADMIN_SECRET, "monarchs_admin_secret_2024").
 
 %% Statistics
 -record(stats, {
@@ -136,6 +148,54 @@ get_stats() ->
 health_check() ->
     gen_server:call(?SERVER, health_check).
 
+%% ============================================================================
+%% ADMIN API FUNCTIONS
+%% ============================================================================
+
+%% Register an admin user (requires admin secret)
+register_admin(Username, Password) ->
+    gen_server:call(?SERVER, {register_admin, Username, Password}).
+
+%% Promote a user to a role
+promote(Token, Username, Role) ->
+    gen_server:call(?SERVER, {promote, Token, Username, Role}).
+
+%% Demote a user to a lower role
+demote(Token, Username) ->
+    gen_server:call(?SERVER, {demote, Token, Username}).
+
+%% Ban a user
+ban(Token, Username, Reason) ->
+    gen_server:call(?SERVER, {ban, Token, Username, Reason}).
+
+%% Unban a user
+unban(Token, Username) ->
+    gen_server:call(?SERVER, {unban, Token, Username}).
+
+%% Kick a user from the server
+kick(Token, Username) ->
+    gen_server:call(?SERVER, {kick, Token, Username}).
+
+%% Get user information
+get_user_info(Username) ->
+    gen_server:call(?SERVER, {get_user_info, Username}).
+
+%% Get all online users
+get_online_users() ->
+    gen_server:call(?SERVER, get_online_users).
+
+%% Get all banned users
+get_banned_users() ->
+    gen_server:call(?SERVER, get_banned_users).
+
+%% Shutdown the server (admin only)
+shutdown(Token, Reason) ->
+    gen_server:call(?SERVER, {shutdown, Token, Reason}).
+
+%% Broadcast a message to all users
+broadcast(Token, Message) ->
+    gen_server:cast(?SERVER, {broadcast, Token, Message}).
+
 %% gen_server callbacks
 init([]) ->
     StartTime = erlang:system_time(second),
@@ -157,6 +217,7 @@ init([]) ->
         ets:new(?ROOMS_TABLE, [set, named_table, public, {read_concurrency, true}]),
         ets:new(?MESSAGES_TABLE, [bag, named_table, public]),
         ets:new(?SESSIONS_TABLE, [set, named_table, public]),
+        ets:new(?BANNED_TABLE, [set, named_table, public, {read_concurrency, true}]),
         
         io:format("[SERVER] ETS tables created successfully~n")
     catch
@@ -227,7 +288,11 @@ handle_call({register, Username, Password}, _From, State) ->
                         created_at = CreatedAt,
                         last_login = undefined,
                         status = offline,
-                        current_room = undefined
+                        current_room = undefined,
+                        role = user,
+                        banned = false,
+                        ban_reason = undefined,
+                        ban_expires = undefined
                     },
                     
                     ets:insert(?USERS_TABLE, {Username, User}),
@@ -253,51 +318,59 @@ handle_call({login, Username, Password, Socket}, {ClientIp, _Port}, State) ->
                     log_audit(login_failed, #{username => Username, reason => not_found, ip => ClientIp}),
                     {reply, {error, "Invalid username or password"}, NewState};
                 [{Username, User}] ->
-                    %% Verify password with constant-time comparison
-                    Salt = User#user.salt,
-                    ExpectedHash = User#user.password_hash,
-                    
-                    case verify_password(Password, Salt, ExpectedHash) of
-                        false ->
-                            log_audit(login_failed, #{username => Username, reason => invalid_password, ip => ClientIp}),
-                            {reply, {error, "Invalid username or password"}, NewState};
+                    %% Check if user is banned
+                    case User#user.banned of
                         true ->
-                            %% Generate secure session token
-                            TokenExpiry = monarchs_config:get(token_expiry, 3600),
-                            {Token, Expiry} = generate_session_token(Username, TokenExpiry),
+                            Reason = User#user.ban_reason,
+                            log_audit(login_banned, #{username => Username, ip => ClientIp, reason => Reason}),
+                            {reply, {error, "You are banned from this server.\nReason: " ++ Reason ++ "\nContact an administrator."}, NewState};
+                        false ->
+                            %% Verify password with constant-time comparison
+                            Salt = User#user.salt,
+                            ExpectedHash = User#user.password_hash,
                             
-                            CurrentTime = erlang:system_time(second),
-                            
-                            %% Update user status
-                            UpdatedUser = User#user{
-                                status = online,
-                                last_login = CurrentTime,
-                                current_room = undefined
-                            },
-                            ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                            NewUsers = maps:put(Username, UpdatedUser, State#state.users),
-                            
-                            %% Create session
-                            Session = #session{
-                                token = Token,
-                                username = Username,
-                                created_at = CurrentTime,
-                                expires_at = Expiry,
-                                socket = Socket,
-                                ip_address = ClientIp,
-                                last_activity = CurrentTime
-                            },
-                            ets:insert(?SESSIONS_TABLE, {Token, Session}),
-                            NewSessions = maps:put(Token, Session, State#state.sessions),
-                            
-                            log_audit(login, #{username => Username, ip => ClientIp}),
-                            io:format("[SERVER] User logged in: ~s (expires ~p)~n", [Username, Expiry]),
-                            
-                            {reply, {ok, Token, Expiry}, State#state{
-                                users = NewUsers,
-                                sessions = NewSessions
-                            }}
-                    end
+                            case verify_password(Password, Salt, ExpectedHash) of
+                                false ->
+                                    log_audit(login_failed, #{username => Username, reason => invalid_password, ip => ClientIp}),
+                                    {reply, {error, "Invalid username or password"}, NewState};
+                                true ->
+                                    %% Generate secure session token
+                                    TokenExpiry = monarchs_config:get(token_expiry, 3600),
+                                    {Token, Expiry} = generate_session_token(Username, TokenExpiry),
+                                    
+                                    CurrentTime = erlang:system_time(second),
+                                    
+                                    %% Update user status
+                                    UpdatedUser = User#user{
+                                        status = online,
+                                        last_login = CurrentTime,
+                                        current_room = undefined,
+                                        socket = Socket
+                                    },
+                                    ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    
+                                    %% Create session
+                                    Session = #session{
+                                        token = Token,
+                                        username = Username,
+                                        created_at = CurrentTime,
+                                        expires_at = Expiry,
+                                        socket = Socket,
+                                        ip_address = ClientIp,
+                                        last_activity = CurrentTime
+                                    },
+                                    ets:insert(?SESSIONS_TABLE, {Token, Session}),
+                                    NewSessions = maps:put(Token, Session, State#state.sessions),
+                                    
+                                    log_audit(login, #{username => Username, ip => ClientIp}),
+                                    io:format("[SERVER] User logged in: ~s (expires ~p)~n", [Username, Expiry]),
+                                    
+                                    {reply, {ok, Token, Expiry}, State#state{
+                                        users = NewUsers,
+                                        sessions = NewSessions
+                                    }}
+                            end
             end
     end;
 
@@ -421,6 +494,357 @@ handle_call(health_check, _From, State) ->
     },
     {reply, Health, State};
 
+%% ============================================================================
+%% ADMIN HANDLERS
+%% ============================================================================
+
+%% Register admin user (first admin - requires no existing admin)
+handle_call({register_admin, Username, Password}, _From, State) ->
+    %% Check if any admin exists yet
+    AllUsers = ets:tab2list(?USERS_TABLE),
+    HasAdmin = lists:any(
+        fun({_, User}) -> User#user.role =:= admin orelse User#user.role =:= owner end,
+        AllUsers
+    ),
+    
+    case HasAdmin of
+        true ->
+            {reply, {error, "Admin already exists. Use /login as admin to promote users."}, State};
+        false ->
+            case validate_registration(Username, Password) of
+                {error, Reason} ->
+                    {reply, {error, Reason}, State};
+                {ok} ->
+                    case ets:lookup(?USERS_TABLE, Username) of
+                        [{Username, _}] ->
+                            {reply, {error, "Username already exists"}, State};
+                        [] ->
+                            Salt = generate_secure_token(32),
+                            Hash = hash_password(Password, Salt),
+                            CreatedAt = erlang:system_time(second),
+                            
+                            User = #user{
+                                username = Username,
+                                password_hash = Hash,
+                                salt = Salt,
+                                email = undefined,
+                                created_at = CreatedAt,
+                                last_login = undefined,
+                                status = offline,
+                                current_room = undefined,
+                                role = owner,
+                                banned = false,
+                                ban_reason = undefined,
+                                ban_expires = undefined
+                            },
+                            
+                            ets:insert(?USERS_TABLE, {Username, User}),
+                            NewUsers = maps:put(Username, User, State#state.users),
+                            
+                            log_audit(admin_registered, #{username => Username}),
+                            io:format("[ADMIN] Owner admin registered: ~s~n", [Username]),
+                            
+                            {reply, ok, State#state{users = NewUsers}}
+                    end
+            end
+    end;
+
+%% Promote user to a role
+handle_call({promote, Token, Username, RoleStr}, _From, State) ->
+    case validate_session(State, Token) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        {ok, AdminName} ->
+            case ets:lookup(?USERS_TABLE, AdminName) of
+                [{_, Admin}] when Admin#user.role =:= owner orelse Admin#user.role =:= admin ->
+                    %% Valid admin, check target user
+                    case ets:lookup(?USERS_TABLE, Username) of
+                        [] ->
+                            {reply, {error, "User not found"}, State};
+                        [{Username, User}] ->
+                            Role = parse_role(RoleStr),
+                            case Role of
+                                invalid ->
+                                    {reply, {error, "Invalid role. Use: moderator, admin, or user"}, State};
+                                _ ->
+                                    UpdatedUser = User#user{role = Role},
+                                    ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    
+                                    log_audit(user_promoted, #{
+                                        admin => AdminName,
+                                        username => Username,
+                                        new_role => RoleStr
+                                    }),
+                                    io:format("[ADMIN] ~s promoted ~s to ~s~n", [AdminName, Username, RoleStr]),
+                                    
+                                    {reply, ok, State#state{users = NewUsers}}
+                            end;
+                _ ->
+                    {reply, {error, "Insufficient permissions. Admin role required."}, State}
+            end
+    end;
+
+%% Demote user to user role
+handle_call({demote, Token, Username}, _From, State) ->
+    case validate_session(State, Token) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        {ok, AdminName} ->
+            case ets:lookup(?USERS_TABLE, AdminName) of
+                [{_, Admin}] when Admin#user.role =:= owner orelse Admin#user.role =:= admin ->
+                    case ets:lookup(?USERS_TABLE, Username) of
+                        [] ->
+                            {reply, {error, "User not found"}, State};
+                        [{Username, User}] ->
+                            UpdatedUser = User#user{role = user},
+                            ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
+                            NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                            
+                            log_audit(user_demoted, #{
+                                admin => AdminName,
+                                username => Username
+                            }),
+                            io:format("[ADMIN] ~s demoted ~s to user~n", [AdminName, Username]),
+                            
+                            {reply, ok, State#state{users = NewUsers}};
+                _ ->
+                    {reply, {error, "Insufficient permissions. Admin role required."}, State}
+            end
+    end;
+
+%% Ban a user
+handle_call({ban, Token, Username, Reason}, _From, State) ->
+    case validate_session(State, Token) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        {ok, AdminName} ->
+            case ets:lookup(?USERS_TABLE, AdminName) of
+                [{_, Admin}] when Admin#user.role =:= owner orelse Admin#user.role =:= admin ->
+                    case ets:lookup(?USERS_TABLE, Username) of
+                        [] ->
+                            {reply, {error, "User not found"}, State};
+                        [{Username, User}] ->
+                            %% Check if already owner (can't ban)
+                            case User#user.role of
+                                owner ->
+                                    {reply, {error, "Cannot ban an owner"}, State};
+                                _ ->
+                                    %% Invalidate user's sessions
+                                    ets:match_delete(?SESSIONS_TABLE, {'_', #session{username = Username}}),
+                                    NewSessions = maps:filter(
+                                        fun(_Token, Session) -> 
+                                            Session#session.username =/= Username 
+                                        end,
+                                        State#state.sessions
+                                    ),
+                                    
+                                    %% Add to banned table
+                                    BanInfo = #{
+                                        username => Username,
+                                        banned_by => AdminName,
+                                        reason => Reason,
+                                        timestamp => erlang:system_time(second),
+                                        expires => undefined
+                                    },
+                                    ets:insert(?BANNED_TABLE, {Username, BanInfo}),
+                                    
+                                    UpdatedUser = User#user{
+                                        banned = true,
+                                        ban_reason = Reason,
+                                        ban_expires = undefined,
+                                        status = offline,
+                                        current_room = undefined
+                                    },
+                                    ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    
+                                    %% Close user's socket if connected
+                                    case User#user.socket of
+                                        undefined -> ok;
+                                        Socket ->
+                                            gen_tcp:send(Socket, list_to_binary("\n\n[BANNED] You have been banned from the server.\nReason: " ++ Reason ++ "\n\n")),
+                                            gen_tcp:close(Socket)
+                                    end,
+                                    
+                                    log_audit(user_banned, #{
+                                        admin => AdminName,
+                                        username => Username,
+                                        reason => Reason
+                                    }),
+                                    io:format("[ADMIN] ~s banned ~s: ~s~n", [AdminName, Username, Reason]),
+                                    
+                                    {reply, ok, State#state{users = NewUsers, sessions = NewSessions}}
+                            end;
+                _ ->
+                    {reply, {error, "Insufficient permissions. Admin role required."}, State}
+            end
+    end;
+
+%% Unban a user
+handle_call({unban, Token, Username}, _From, State) ->
+    case validate_session(State, Token) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        {ok, AdminName} ->
+            case ets:lookup(?USERS_TABLE, AdminName) of
+                [{_, Admin}] when Admin#user.role =:= owner orelse Admin#user.role =:= admin ->
+                    case ets:lookup(?BANNED_TABLE, Username) of
+                        [] ->
+                            {reply, {error, "User is not banned"}, State};
+                        [{Username, _}] ->
+                            ets:delete(?BANNED_TABLE, Username),
+                            
+                            case ets:lookup(?USERS_TABLE, Username) of
+                                [{Username, User}] ->
+                                    UpdatedUser = User#user{
+                                        banned = false,
+                                        ban_reason = undefined,
+                                        ban_expires = undefined
+                                    },
+                                    ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    
+                                    log_audit(user_unbanned, #{
+                                        admin => AdminName,
+                                        username => Username
+                                    }),
+                                    io:format("[ADMIN] ~s unbanned ~s~n", [AdminName, Username]),
+                                    
+                                    {reply, ok, State#state{users = NewUsers}};
+                                _ ->
+                                    {reply, ok, State}
+                            end
+                    end;
+                _ ->
+                    {reply, {error, "Insufficient permissions. Admin role required."}, State}
+            end
+    end;
+
+%% Kick a user
+handle_call({kick, Token, Username}, _From, State) ->
+    case validate_session(State, Token) of
+        {error, Reason} ->
+            {reply, {error, Reason}, State};
+        {ok, AdminName} ->
+            case ets:lookup(?USERS_TABLE, AdminName) of
+                [{_, Admin}] when Admin#user.role =:= owner orelse Admin#user.role =:= admin ->
+                    case ets:lookup(?USERS_TABLE, Username) of
+                        [] ->
+                            {reply, {error, "User not found"}, State};
+                        [{Username, User}] ->
+                            %% Check if trying to kick admin/owner
+                            case User#user.role of
+                                owner ->
+                                    {reply, {error, "Cannot kick an owner"}, State};
+                                _ when User#user.role =:= admin andalso Admin#user.role =/= owner ->
+                                    {reply, {error, "Only owners can kick admins"}, State};
+                                _ ->
+                                    %% Invalidate user's sessions
+                                    ets:match_delete(?SESSIONS_TABLE, {'_', #session{username = Username}}),
+                                    NewSessions = maps:filter(
+                                        fun(_Token, Session) -> 
+                                            Session#session.username =/= Username 
+                                        end,
+                                        State#state.sessions
+                                    ),
+                                    
+                                    UpdatedUser = User#user{
+                                        status = offline,
+                                        current_room = undefined,
+                                        socket = undefined
+                                    },
+                                    ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    
+                                    %% Close user's socket
+                                    case User#user.socket of
+                                        undefined -> ok;
+                                        Socket ->
+                                            gen_tcp:send(Socket, list_to_binary("\n\n[KICKED] You have been kicked from the server.\n\n")),
+                                            gen_tcp:close(Socket)
+                                    end,
+                                    
+                                    log_audit(user_kicked, #{
+                                        admin => AdminName,
+                                        username => Username
+                                    }),
+                                    io:format("[ADMIN] ~s kicked ~s~n", [AdminName, Username]),
+                                    
+                                    {reply, ok, State#state{users = NewUsers, sessions = NewSessions}}
+                            end;
+                _ ->
+                    {reply, {error, "Insufficient permissions. Admin role required."}, State}
+            end
+    end;
+
+%% Get user info
+handle_call({get_user_info, Username}, _From, State) ->
+    case ets:lookup(?USERS_TABLE, Username) of
+        [] ->
+            {reply, {error, "User not found"}, State};
+        [{Username, User}] ->
+            Info = #{
+                username => Username,
+                role => User#user.role,
+                status => User#user.status,
+                banned => User#user.banned,
+                ban_reason => User#user.ban_reason,
+                created_at => User#user.created_at,
+                last_login => User#user.last_login,
+                current_room => User#user.current_room
+            },
+            {reply, Info, State}
+    end;
+
+%% Get online users
+handle_call(get_online_users, _From, State) ->
+    OnlineUsers = [
+        Username || {Username, User} <- ets:tab2list(?USERS_TABLE),
+        User#user.status =:= online
+    ],
+    {reply, OnlineUsers, State};
+
+%% Get banned users
+handle_call(get_banned_users, _From, State) ->
+    BannedUsers = [
+        Username || {Username, _} <- ets:tab2list(?BANNED_TABLE)
+    ],
+    {reply, BannedUsers, State};
+
+%% Shutdown server
+handle_call({shutdown, Token, Reason}, _From, State) ->
+    case validate_session(State, Token) of
+        {error, _} ->
+            {reply, {error, "Invalid session"}, State};
+        {ok, AdminName} ->
+            case ets:lookup(?USERS_TABLE, AdminName) of
+                [{_, Admin}] when Admin#user.role =:= owner ->
+                    io:format("[ADMIN] Server shutdown initiated by ~s: ~s~n", [AdminName, Reason]),
+                    
+                    %% Broadcast shutdown message
+                    BroadcastMsg = io_lib:format("\n\n[SERVER] Server is shutting down: ~s\n\n", [Reason]),
+                    
+                    lists:foreach(
+                        fun({_, User}) ->
+                            case User#user.socket of
+                                undefined -> ok;
+                                Socket ->
+                                    gen_tcp:send(Socket, list_to_binary(BroadcastMsg))
+                            end
+                        end,
+                        ets:tab2list(?USERS_TABLE)
+                    ),
+                    
+                    %% Schedule shutdown after 2 seconds
+                    erlang:send_after(2000, self(), shutdown),
+                    
+                    {reply, ok, State};
+                _ ->
+                    {reply, {error, "Only owners can shutdown the server"}, State}
+            end
+    end;
+
 %% Stop server
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
@@ -509,10 +933,10 @@ handle_cast({send_message, Token, RoomName, Message}, State) ->
                         room = RoomName,
                         sender = Username,
                         content = SanitizedMessage,
-                    timestamp = erlang:system_time(millisecond),
-                    type = room,
-                    metadata = #{}
-                },
+                        timestamp = erlang:system_time(millisecond),
+                        type = room,
+                        metadata = #{}
+                    },
                     
                     %% Store message
                     ets:insert(?MESSAGES_TABLE, {RoomName, Msg}),
@@ -560,6 +984,35 @@ handle_cast({send_private, Token, ToUser, Message}, State) ->
             end
     end;
 
+%% Broadcast message to all users
+handle_cast({broadcast, Token, Message}, State) ->
+    case validate_session(State, Token) of
+        {error, _} ->
+            {noreply, State};
+        {ok, AdminName} ->
+            case ets:lookup(?USERS_TABLE, AdminName) of
+                [{_, Admin}] when Admin#user.role =:= owner orelse Admin#user.role =:= admin ->
+                    SanitizedMessage = sanitize_message(Message),
+                    FormattedMsg = io_lib:format("\n[BROADCAST from ~s] ~s\n\n", [AdminName, SanitizedMessage]),
+                    
+                    lists:foreach(
+                        fun({_, User}) ->
+                            case User#user.socket of
+                                undefined -> ok;
+                                Socket ->
+                                    gen_tcp:send(Socket, list_to_binary(FormattedMsg))
+                            end
+                        end,
+                        ets:tab2list(?USERS_TABLE)
+                    ),
+                    
+                    io:format("[BROADCAST] ~s: ~s~n", [AdminName, SanitizedMessage]),
+                    {noreply, State};
+                _ ->
+                    {noreply, State}
+            end
+    end;
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -589,17 +1042,35 @@ handle_info(cleanup_expired_sessions, State) ->
     
     {noreply, State#state{sessions = NewSessions}};
 
+handle_info(shutdown, State) ->
+    io:format("[SERVER] Server shutting down gracefully...~n"),
+    {stop, normal, State};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, State) ->
+terminate(Reason, State) ->
+    io:format("[SERVER] Terminating: ~p~n", [Reason]),
+    
     %% Persist data before shutdown
     persist_data(State),
     
+    %% Close listen socket
     case State#state.listen_socket of
         undefined -> ok;
-        Socket -> gen_tcp:close(Socket)
+        ListenSocket -> gen_tcp:close(ListenSocket)
     end,
+    
+    %% Close all user sockets
+    lists:foreach(
+        fun({_, User}) ->
+            case User#user.socket of
+                undefined -> ok;
+                Socket -> gen_tcp:close(Socket)
+            end
+        end,
+        ets:tab2list(?USERS_TABLE)
+    ),
     
     log_audit(terminate, #{event => server_stop}),
     io:format("[SERVER] Monarchs server stopped~n"),
@@ -751,6 +1222,38 @@ validate_session(State, Token) ->
                     {error, "Session expired"};
                 _ ->
                     {ok, Session#session.username}
+            end
+    end.
+
+%% Parse role string to atom
+parse_role("moderator") -> moderator;
+parse_role("mod") -> moderator;
+parse_role("admin") -> admin;
+parse_role("administrator") -> admin;
+parse_role("user") -> user;
+parse_role("owner") -> owner;
+parse_role(_) -> invalid.
+
+%% Check if user is banned
+check_banned(Username) ->
+    case ets:lookup(?BANNED_TABLE, Username) of
+        [] ->
+            case ets:lookup(?USERS_TABLE, Username) of
+                [] -> not_found;
+                [{Username, User}] -> {banned, User#user.ban_reason}
+            end;
+        [{Username, BanInfo}] ->
+            Expires = maps:get(expires, BanInfo, undefined),
+            CurrentTime = erlang:system_time(second),
+            case Expires of
+                undefined ->
+                    {banned, maps:get(reason, BanInfo)};
+                ExpTime when ExpTime > CurrentTime ->
+                    {banned, maps:get(reason, BanInfo)};
+                _ ->
+                    %% Ban expired, remove it
+                    ets:delete(?BANNED_TABLE, Username),
+                    not_banned
             end
     end.
 
