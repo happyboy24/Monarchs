@@ -1,6 +1,8 @@
 -module(monarchs_server).
 -behaviour(gen_server).
 
+-include("monarchs_server.hrl").
+
 %% OTP Supervision
 -export([start_link/0]).
 
@@ -10,7 +12,7 @@
 
 %% API
 -export([
-    register_user/2, login/3, logout/1,
+    register_user/3, login/3, logout/1,
     create_room/2, join_room/2, leave_room/2,
     send_message/3, send_private/3,
     get_rooms/0, get_users/0, get_room_users/1,
@@ -25,90 +27,13 @@
 -define(SERVER, ?MODULE).
 -define(PORT, 5678).
 
-%% Data records with proper typing
--record(user, {
-    username :: string(),
-    password_hash :: string(),
-    salt :: string(),
-    email :: string() | undefined,
-    created_at :: integer(),
-    last_login :: integer() | undefined,
-    status :: online | away | offline,
-    current_room :: string() | undefined,
-    socket :: inet:socket() | undefined,
-    role :: user | moderator | admin | owner,
-    banned :: boolean(),
-    ban_reason :: string() | undefined,
-    ban_expires :: integer() | undefined
-}).
-
--record(room, {
-    name :: string(),
-    users = [] :: [string()],
-    owner :: string(),
-    created_at :: integer(),
-    type :: public | private,
-    max_users :: integer() | undefined,
-    settings :: map()
-}).
-
--record(message, {
-    id :: string(),
-    room :: string(),
-    sender :: string(),
-    content :: string(),
-    timestamp :: integer(),
-    type :: room | private,
-    metadata :: map()
-}).
-
--record(session, {
-    token :: string(),
-    username :: string(),
-    created_at :: integer(),
-    expires_at :: integer(),
-    socket :: inet:socket() | undefined,
-    ip_address :: tuple() | undefined,
-    last_activity :: integer()
-}).
-
--record(state, {
-    users = #{} :: #{string() => #user{}},
-    sessions = #{} :: #{string() => #session{}},
-    rooms = #{} :: #{string() => #room{}},
-    messages = #{} :: #{string() => [#message{}]},
-    listen_socket :: inet:socket() | undefined,
-    message_counter = 0 :: integer(),
-    connection_count = 0 :: integer(),
-    start_time :: integer()
-}).
-
-%% ETS table names
--define(USERS_TABLE, monarchs_users).
--define(ROOMS_TABLE, monarchs_rooms).
--define(MESSAGES_TABLE, monarchs_messages).
--define(SESSIONS_TABLE, monarchs_sessions).
--define(BANNED_TABLE, monarchs_banned).
-
-%% Admin secret for initial setup (change in production!)
--define(ADMIN_SECRET, "monarchs_admin_secret_2024").
-
-%% Statistics
--record(stats, {
-    total_users = 0 :: integer(),
-    online_users = 0 :: integer(),
-    total_rooms = 0 :: integer(),
-    total_messages = 0 :: integer(),
-    uptime_seconds = 0 :: integer()
-}).
-
 %% OTP Supervisor Start
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% API Functions
-register_user(Username, Password) ->
-    gen_server:call(?SERVER, {register, Username, Password}).
+register_user(Username, Password, AdminSecret) ->
+    gen_server:call(?SERVER, {register, Username, Password, AdminSecret}).
 
 login(Username, Password, Socket) ->
     gen_server:call(?SERVER, {login, Username, Password, Socket}).
@@ -212,18 +137,18 @@ init([]) ->
     io:format("[SERVER] Max connections: ~p~n", [MaxConnections]),
     
     %% Create ETS tables for in-memory storage
-    try
+    %% try
         ets:new(?USERS_TABLE, [set, named_table, public, {read_concurrency, true}]),
         ets:new(?ROOMS_TABLE, [set, named_table, public, {read_concurrency, true}]),
         ets:new(?MESSAGES_TABLE, [bag, named_table, public]),
         ets:new(?SESSIONS_TABLE, [set, named_table, public]),
         ets:new(?BANNED_TABLE, [set, named_table, public, {read_concurrency, true}]),
         
-        io:format("[SERVER] ETS tables created successfully~n")
-    catch
-        error:Reason ->
-            io:format("[SERVER] ETS table creation failed: ~p~n", [Reason])
-    end,
+        io:format("[SERVER] ETS tables created successfully~n"),
+    %% catch
+    %%     error:Reason ->
+    %%         io:format("[SERVER] ETS table creation failed: ~p~n", [Reason])
+    %% end,
     
     %% Start TCP listener
     ListenSocket = case gen_tcp:listen(BackendPort, [
@@ -251,7 +176,7 @@ init([]) ->
             io:format("[SERVER] OTP Supervision Tree Active~n"),
             io:format("[SERVER] Waiting for connections...~n~n", []),
             
-            {ok, #state{
+            {ok, #server_state{
                 users = #{},
                 sessions = #{},
                 rooms = #{},
@@ -264,7 +189,7 @@ init([]) ->
     end.
 
 %% Handle registration with secure password hashing
-handle_call({register, Username, Password}, _From, State) ->
+handle_call({register, Username, Password, AdminSecret}, _From, State) ->
     case validate_registration(Username, Password) of
         {error, Reason} ->
             log_audit(register_failed, #{username => Username, reason => Reason}),
@@ -280,6 +205,12 @@ handle_call({register, Username, Password}, _From, State) ->
                     Hash = hash_password(Password, Salt),
                     CreatedAt = erlang:system_time(second),
                     
+                    %% Determine role based on admin secret
+                    Role = case AdminSecret of
+                        ?ADMIN_SECRET -> admin;
+                        _ -> user
+                    end,
+                    
                     User = #user{
                         username = Username,
                         password_hash = Hash,
@@ -289,19 +220,19 @@ handle_call({register, Username, Password}, _From, State) ->
                         last_login = undefined,
                         status = offline,
                         current_room = undefined,
-                        role = user,
+                        role = Role,
                         banned = false,
                         ban_reason = undefined,
                         ban_expires = undefined
                     },
                     
                     ets:insert(?USERS_TABLE, {Username, User}),
-                    NewUsers = maps:put(Username, User, State#state.users),
+                    NewUsers = maps:put(Username, User, State#server_state.users),
                     
                     log_audit(register, #{username => Username}),
                     io:format("[SERVER] User registered: ~s~n", [Username]),
                     
-                    {reply, ok, State#state{users = NewUsers}}
+                    {reply, ok, State#server_state{users = NewUsers}}
             end
     end;
 
@@ -348,7 +279,7 @@ handle_call({login, Username, Password, Socket}, {ClientIp, _Port}, State) ->
                                         socket = Socket
                                     },
                                     ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                                     
                                     %% Create session
                                     Session = #session{
@@ -361,12 +292,12 @@ handle_call({login, Username, Password, Socket}, {ClientIp, _Port}, State) ->
                                         last_activity = CurrentTime
                                     },
                                     ets:insert(?SESSIONS_TABLE, {Token, Session}),
-                                    NewSessions = maps:put(Token, Session, State#state.sessions),
+                                    NewSessions = maps:put(Token, Session, State#server_state.sessions),
                                     
                                     log_audit(login, #{username => Username, ip => ClientIp}),
                                     io:format("[SERVER] User logged in: ~s (expires ~p)~n", [Username, Expiry]),
                                     
-                                    {reply, {ok, Token, Expiry}, State#state{
+                                    {reply, {ok, Token, Expiry}, State#server_state{
                                         users = NewUsers,
                                         sessions = NewSessions
                                     }}
@@ -399,12 +330,12 @@ handle_call({create_room, Token, RoomName}, _From, State) ->
                                 settings = #{}
                             },
                             ets:insert(?ROOMS_TABLE, {RoomName, Room}),
-                            NewRooms = maps:put(RoomName, Room, State#state.rooms),
+                            NewRooms = maps:put(RoomName, Room, State#server_state.rooms),
                             
                             log_audit(room_created, #{room => RoomName, owner => Username}),
                             io:format("[SERVER] Room created: ~s by ~s~n", [RoomName, Username]),
                             
-                            {reply, ok, State#state{rooms = NewRooms}}
+                            {reply, ok, State#server_state{rooms = NewRooms}}
                     end
             end
     end;
@@ -429,20 +360,20 @@ handle_call({join_room, Token, RoomName}, _From, State) ->
                     UpdatedUsers = lists:usort([Username | Room#room.users]),
                     UpdatedRoom = Room#room{users = UpdatedUsers},
                     ets:insert(?ROOMS_TABLE, {RoomName, UpdatedRoom}),
-                    NewRooms = maps:put(RoomName, UpdatedRoom, State#state.rooms),
+                    NewRooms = maps:put(RoomName, UpdatedRoom, State#server_state.rooms),
                     
                     case ets:lookup(?USERS_TABLE, Username) of
                         [{Username, User}] ->
                             UpdatedUser = User#user{current_room = RoomName},
                             ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                            NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                            NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                             
                             log_audit(room_joined, #{room => RoomName, username => Username}),
                             io:format("[SERVER] User joined room: ~s joined ~s~n", [Username, RoomName]),
                             
-                            {reply, ok, State#state{rooms = NewRooms, users = NewUsers}};
+                            {reply, ok, State#server_state{rooms = NewRooms, users = NewUsers}};
                         _ ->
-                            {reply, ok, State#state{rooms = NewRooms}}
+                            {reply, ok, State#server_state{rooms = NewRooms}}
                     end
             end
     end;
@@ -468,16 +399,16 @@ handle_call({get_room_users, RoomName}, _From, State) ->
 
 %% Get server statistics
 handle_call(get_stats, _From, State) ->
-    Uptime = erlang:system_time(second) - State#state.start_time,
-    TotalUsers = map_size(State#state.users),
-    TotalRooms = map_size(State#state.rooms),
-    OnlineUsers = length([U || U <- maps:values(State#state.users), U#user.status =:= online]),
+    Uptime = erlang:system_time(second) - State#server_state.start_time,
+    TotalUsers = map_size(State#server_state.users),
+    TotalRooms = map_size(State#server_state.rooms),
+    OnlineUsers = length([U || U <- maps:values(State#server_state.users), U#user.status =:= online]),
     
     Stats = #stats{
         total_users = TotalUsers,
         online_users = OnlineUsers,
         total_rooms = TotalRooms,
-        total_messages = State#state.message_counter,
+        total_messages = State#server_state.message_counter,
         uptime_seconds = Uptime
     },
     
@@ -487,8 +418,8 @@ handle_call(get_stats, _From, State) ->
 handle_call(health_check, _From, State) ->
     Health = #{
         status => healthy,
-        uptime => erlang:system_time(second) - State#state.start_time,
-        connections => State#state.connection_count,
+        uptime => erlang:system_time(second) - State#server_state.start_time,
+        connections => State#server_state.connection_count,
         memory => erlang:memory(total),
         version => "2.0.0"
     },
@@ -539,12 +470,12 @@ handle_call({register_admin, Username, Password}, _From, State) ->
                             },
                             
                             ets:insert(?USERS_TABLE, {Username, User}),
-                            NewUsers = maps:put(Username, User, State#state.users),
+                            NewUsers = maps:put(Username, User, State#server_state.users),
                             
                             log_audit(admin_registered, #{username => Username}),
                             io:format("[ADMIN] Owner admin registered: ~s~n", [Username]),
                             
-                            {reply, ok, State#state{users = NewUsers}}
+                            {reply, ok, State#server_state{users = NewUsers}}
                     end
             end
     end;
@@ -569,7 +500,7 @@ handle_call({promote, Token, Username, RoleStr}, _From, State) ->
                                 _ ->
                                     UpdatedUser = User#user{role = Role},
                                     ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                                     
                                     log_audit(user_promoted, #{
                                         admin => AdminName,
@@ -578,7 +509,7 @@ handle_call({promote, Token, Username, RoleStr}, _From, State) ->
                                     }),
                                     io:format("[ADMIN] ~s promoted ~s to ~s~n", [AdminName, Username, RoleStr]),
                                     
-                                    {reply, ok, State#state{users = NewUsers}}
+                                    {reply, ok, State#server_state{users = NewUsers}}
                             end;
                 _ ->
                     {reply, {error, "Insufficient permissions. Admin role required."}, State}
@@ -599,7 +530,7 @@ handle_call({demote, Token, Username}, _From, State) ->
                         [{Username, User}] ->
                             UpdatedUser = User#user{role = user},
                             ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                            NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                            NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                             
                             log_audit(user_demoted, #{
                                 admin => AdminName,
@@ -607,7 +538,7 @@ handle_call({demote, Token, Username}, _From, State) ->
                             }),
                             io:format("[ADMIN] ~s demoted ~s to user~n", [AdminName, Username]),
                             
-                            {reply, ok, State#state{users = NewUsers}};
+                            {reply, ok, State#server_state{users = NewUsers}};
                 _ ->
                     {reply, {error, "Insufficient permissions. Admin role required."}, State}
             end
@@ -636,7 +567,7 @@ handle_call({ban, Token, Username, Reason}, _From, State) ->
                                         fun(_Token, Session) -> 
                                             Session#session.username =/= Username 
                                         end,
-                                        State#state.sessions
+                                        State#server_state.sessions
                                     ),
                                     
                                     %% Add to banned table
@@ -657,7 +588,7 @@ handle_call({ban, Token, Username, Reason}, _From, State) ->
                                         current_room = undefined
                                     },
                                     ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                                     
                                     %% Close user's socket if connected
                                     case User#user.socket of
@@ -674,7 +605,7 @@ handle_call({ban, Token, Username, Reason}, _From, State) ->
                                     }),
                                     io:format("[ADMIN] ~s banned ~s: ~s~n", [AdminName, Username, Reason]),
                                     
-                                    {reply, ok, State#state{users = NewUsers, sessions = NewSessions}}
+                                    {reply, ok, State#server_state{users = NewUsers, sessions = NewSessions}}
                             end;
                 _ ->
                     {reply, {error, "Insufficient permissions. Admin role required."}, State}
@@ -703,7 +634,7 @@ handle_call({unban, Token, Username}, _From, State) ->
                                         ban_expires = undefined
                                     },
                                     ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                                     
                                     log_audit(user_unbanned, #{
                                         admin => AdminName,
@@ -711,7 +642,7 @@ handle_call({unban, Token, Username}, _From, State) ->
                                     }),
                                     io:format("[ADMIN] ~s unbanned ~s~n", [AdminName, Username]),
                                     
-                                    {reply, ok, State#state{users = NewUsers}};
+                                    {reply, ok, State#server_state{users = NewUsers}};
                                 _ ->
                                     {reply, ok, State}
                             end
@@ -746,7 +677,7 @@ handle_call({kick, Token, Username}, _From, State) ->
                                         fun(_Token, Session) -> 
                                             Session#session.username =/= Username 
                                         end,
-                                        State#state.sessions
+                                        State#server_state.sessions
                                     ),
                                     
                                     UpdatedUser = User#user{
@@ -755,7 +686,7 @@ handle_call({kick, Token, Username}, _From, State) ->
                                         socket = undefined
                                     },
                                     ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                                    NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                                     
                                     %% Close user's socket
                                     case User#user.socket of
@@ -771,86 +702,80 @@ handle_call({kick, Token, Username}, _From, State) ->
                                     }),
                                     io:format("[ADMIN] ~s kicked ~s~n", [AdminName, Username]),
                                     
-                                    {reply, ok, State#state{users = NewUsers, sessions = NewSessions}}
+                                    {reply, ok, State#server_state{users = NewUsers, sessions = NewSessions}}
                             end;
                 _ ->
                     {reply, {error, "Insufficient permissions. Admin role required."}, State}
             end
     end;
 
-%% Get user info
-handle_call({get_user_info, Username}, _From, State) ->
-    case ets:lookup(?USERS_TABLE, Username) of
-        [] ->
-            {reply, {error, "User not found"}, State};
-        [{Username, User}] ->
-            Info = #{
-                username => Username,
-                role => User#user.role,
-                status => User#user.status,
-                banned => User#user.banned,
-                ban_reason => User#user.ban_reason,
-                created_at => User#user.created_at,
-                last_login => User#user.last_login,
-                current_room => User#user.current_room
-            },
-            {reply, Info, State}
-    end;
+%% %% Get user info
+%% handle_call({get_user_info, Username}, _From, State) ->
+%%     case ets:lookup(?USERS_TABLE, Username) of
+%%         [] ->
+%%             {reply, {error, "User not found"}, State};
+%%         [{Username, User}] ->
+%%             Info = #{
+%%                 username => Username,
+%%                 role => User#user.role,
+%%                 status => User#user.status,
+%%                 banned => User#user.banned,
+%%                 ban_reason => User#user.ban_reason,
+%%                 created_at => User#user.created_at,
+%%                 last_login => User#user.last_login,
+%%                 current_room => User#user.current_room
+%%             },
+%%             {reply, Info, State}
+%%     end;
 
 %% Get online users
 handle_call(get_online_users, _From, State) ->
-    OnlineUsers = [
-        Username || {Username, User} <- ets:tab2list(?USERS_TABLE),
-        User#user.status =:= online
-    ],
-    {reply, OnlineUsers, State};
+    OnlineUsers = [],
+    {reply, OnlineUsers, State}.
 
-%% Get banned users
-handle_call(get_banned_users, _From, State) ->
-    BannedUsers = [
-        Username || {Username, _} <- ets:tab2list(?BANNED_TABLE)
-    ],
-    {reply, BannedUsers, State};
+%% %% Get banned users
+%% handle_call(get_banned_users, _From, State) ->
+%%     BannedUsers = [
+%%         Username || {Username, _} <- ets:tab2list(?BANNED_TABLE)
+%%     ],
+%%     {reply, BannedUsers, State}.
 
-%% Shutdown server
-handle_call({shutdown, Token, Reason}, _From, State) ->
-    case validate_session(State, Token) of
-        {error, _} ->
-            {reply, {error, "Invalid session"}, State};
-        {ok, AdminName} ->
-            case ets:lookup(?USERS_TABLE, AdminName) of
-                [{_, Admin}] when Admin#user.role =:= owner ->
-                    io:format("[ADMIN] Server shutdown initiated by ~s: ~s~n", [AdminName, Reason]),
-                    
-                    %% Broadcast shutdown message
-                    BroadcastMsg = io_lib:format("\n\n[SERVER] Server is shutting down: ~s\n\n", [Reason]),
-                    
-                    lists:foreach(
-                        fun({_, User}) ->
-                            case User#user.socket of
-                                undefined -> ok;
-                                Socket ->
-                                    gen_tcp:send(Socket, list_to_binary(BroadcastMsg))
-                            end
-                        end,
-                        ets:tab2list(?USERS_TABLE)
-                    ),
-                    
-                    %% Schedule shutdown after 2 seconds
-                    erlang:send_after(2000, self(), shutdown),
-                    
-                    {reply, ok, State};
-                _ ->
-                    {reply, {error, "Only owners can shutdown the server"}, State}
-            end
-    end;
+%% %% Shutdown server
+%% handle_call({shutdown, Token, Reason}, _From, State) ->
+%%     case validate_session(State, Token) of
+%%         {error, _} ->
+%%             {reply, {error, "Invalid session"}, State};
+%%         {ok, AdminName} ->
+%%             case ets:lookup(?USERS_TABLE, AdminName) of
+%%                 [{_, Admin}] when Admin#user.role =:= owner ->
+%%                     io:format("[ADMIN] Server shutdown initiated by ~s: ~s~n", [AdminName, Reason]),
+%%                     
+%%                     %% Broadcast shutdown message
+%%                     BroadcastMsg = io_lib:format("\n\n[SERVER] Server is shutting down: ~s\n\n", [Reason]),
+%%                     
+%%                     lists:foreach(
+%%                         fun({_, User}) ->
+%%                             case User#user.socket of
+%%                                 undefined -> ok;
+%%                                 Socket ->
+%%                                     gen_tcp:send(Socket, list_to_binary(BroadcastMsg))
+%%                             end
+%%                         end,
+%%                         ets:tab2list(?USERS_TABLE)
+%%                     ),
+%%                     
+%%                     %% Schedule shutdown after 2 seconds
+%%                     erlang:send_after(2000, self(), shutdown),
+%%                     
+%%                     {reply, ok, State};
+%%                 _ ->
+%%                     {reply, {error, "Only owners can shutdown the server"}, State}
+%%             end
+%%     end.
 
 %% Stop server
-handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
-
-handle_call(_Request, _From, State) ->
-    {reply, ignored, State}.
+%% handle_call(stop, _From, State) ->
+%%     {stop, normal, ok, State};
 
 %% Logout handler
 handle_cast({logout, Token}, State) ->
@@ -863,7 +788,7 @@ handle_cast({logout, Token}, State) ->
             
             %% Remove session
             ets:delete(?SESSIONS_TABLE, Token),
-            NewSessions = maps:remove(Token, State#state.sessions),
+            NewSessions = maps:remove(Token, State#server_state.sessions),
             
             %% Update user status
             case ets:lookup(?USERS_TABLE, Username) of
@@ -873,10 +798,10 @@ handle_cast({logout, Token}, State) ->
                         current_room = undefined
                     },
                     ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                    NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                    NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                     
                     log_audit(logout, #{username => Username}),
-                    {noreply, State#state{sessions = NewSessions, users = NewUsers}};
+                    {noreply, State#server_state{sessions = NewSessions, users = NewUsers}};
                 _ ->
                     {noreply, State}
             end
@@ -895,19 +820,19 @@ handle_cast({leave_room, Token, RoomName}, State) ->
                     UpdatedRoomUsers = lists:delete(Username, Room#room.users),
                     UpdatedRoom = Room#room{users = UpdatedRoomUsers},
                     ets:insert(?ROOMS_TABLE, {RoomName, UpdatedRoom}),
-                    NewRooms = maps:put(RoomName, UpdatedRoom, State#state.rooms),
+                    NewRooms = maps:put(RoomName, UpdatedRoom, State#server_state.rooms),
                     
                     case ets:lookup(?USERS_TABLE, Username) of
                         [{Username, User}] ->
                             UpdatedUser = User#user{current_room = undefined},
                             ets:insert(?USERS_TABLE, {Username, UpdatedUser}),
-                            NewUsers = maps:put(Username, UpdatedUser, State#state.users),
+                            NewUsers = maps:put(Username, UpdatedUser, State#server_state.users),
                             
                             log_audit(room_left, #{room => RoomName, username => Username}),
                             io:format("[SERVER] User left room: ~s left ~s~n", [Username, RoomName]),
-                            {noreply, State#state{rooms = NewRooms, users = NewUsers}};
+                            {noreply, State#server_state{rooms = NewRooms, users = NewUsers}};
                         _ ->
-                            {noreply, State#state{rooms = NewRooms}}
+                            {noreply, State#server_state{rooms = NewRooms}}
                     end
             end
     end;
@@ -926,7 +851,7 @@ handle_cast({send_message, Token, RoomName, Message}, State) ->
                     SanitizedMessage = sanitize_message(Message),
                     
                     %% Create message record
-                    NewCounter = State#state.message_counter + 1,
+                    NewCounter = State#server_state.message_counter + 1,
                     MsgId = generate_message_id(),
                     Msg = #message{
                         id = MsgId,
@@ -940,9 +865,9 @@ handle_cast({send_message, Token, RoomName, Message}, State) ->
                     
                     %% Store message
                     ets:insert(?MESSAGES_TABLE, {RoomName, Msg}),
-                    RoomMessages = maps:get(RoomName, State#state.messages, []),
+                    RoomMessages = maps:get(RoomName, State#server_state.messages, []),
                     NewRoomMessages = RoomMessages ++ [Msg],
-                    NewMessages = maps:put(RoomName, NewRoomMessages, State#state.messages),
+                    NewMessages = maps:put(RoomName, NewRoomMessages, State#server_state.messages),
                     
                     %% Broadcast to room users
                     FormattedMsg = io_lib:format("[~s] <~s> ~s~n", [RoomName, Username, SanitizedMessage]),
@@ -959,7 +884,7 @@ handle_cast({send_message, Token, RoomName, Message}, State) ->
                     ),
                     
                     io:format("[MESSAGE] ~s", [FormattedMsg]),
-                    {noreply, State#state{messages = NewMessages, message_counter = NewCounter}}
+                    {noreply, State#server_state{messages = NewMessages, message_counter = NewCounter}}
             end
     end;
 
@@ -1032,7 +957,7 @@ handle_info(cleanup_expired_sessions, State) ->
         fun(_Token, Session) ->
             Session#session.expires_at >= CurrentTime
         end,
-        State#state.sessions
+        State#server_state.sessions
     ),
     
     io:format("[SERVER] Cleaned up ~p expired sessions~n", [length(ExpiredSessions)]),
@@ -1040,7 +965,7 @@ handle_info(cleanup_expired_sessions, State) ->
     %% Schedule next cleanup in 5 minutes
     erlang:send_after(300000, self(), cleanup_expired_sessions),
     
-    {noreply, State#state{sessions = NewSessions}};
+    {noreply, State#server_state{sessions = NewSessions}};
 
 handle_info(shutdown, State) ->
     io:format("[SERVER] Server shutting down gracefully...~n"),
@@ -1056,7 +981,7 @@ terminate(Reason, State) ->
     persist_data(State),
     
     %% Close listen socket
-    case State#state.listen_socket of
+    case State#server_state.listen_socket of
         undefined -> ok;
         ListenSocket -> gen_tcp:close(ListenSocket)
     end,

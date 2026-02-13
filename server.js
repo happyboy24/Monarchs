@@ -665,7 +665,7 @@ async function handleMessage(ws, connectionId, data, state) {
     const { username, token, currentRoom, isAuthenticated, setAuth, setRoom, erlangSocket } = state;
     
     switch (data.type) {
-        case 'register':
+        case 'register': {
             const registerResult = await sendToErlang(`/register ${data.username} ${data.password}`);
             if (registerResult.includes('Error:')) {
                 ws.send(JSON.stringify({ type: 'error', content: registerResult.replace('Error: ', '').trim() }));
@@ -674,8 +674,9 @@ async function handleMessage(ws, connectionId, data, state) {
                 ws.send(JSON.stringify({ type: 'success', content: 'Registration successful! Please login.' }));
             }
             break;
+        }
             
-        case 'login':
+        case 'login': {
             const loginResult = await sendToErlang(`/login ${data.username} ${data.password}`);
             
             if (loginResult.includes('Login successful')) {
@@ -694,17 +695,19 @@ async function handleMessage(ws, connectionId, data, state) {
                 }));
             }
             break;
+        }
             
-        case 'create_room':
+        case 'create_room': {
             if (!isAuthenticated) {
                 ws.send(JSON.stringify({ type: 'error', content: 'Authentication required' }));
                 return;
             }
-            const createResult = await sendToErlang(`/create ${data.room_name}`);
+            await sendToErlang(`/create ${data.room_name}`);
             ws.send(JSON.stringify({ type: 'success', content: 'Room created!' }));
             break;
+        }
             
-        case 'join_room':
+        case 'join_room': {
             if (!isAuthenticated) {
                 ws.send(JSON.stringify({ type: 'error', content: 'Authentication required' }));
                 return;
@@ -713,11 +716,12 @@ async function handleMessage(ws, connectionId, data, state) {
                 await sendToErlang(`/leave`);
             }
             setRoom(data.room_name);
-            const joinResult = await sendToErlang(`/join ${data.room_name}`);
+            await sendToErlang(`/join ${data.room_name}`);
             ws.send(JSON.stringify({ type: 'success', content: `Joined ${data.room_name}` }));
             break;
+        }
             
-        case 'message':
+        case 'message': {
             if (!isAuthenticated) {
                 ws.send(JSON.stringify({ type: 'error', content: 'Authentication required' }));
                 return;
@@ -728,8 +732,9 @@ async function handleMessage(ws, connectionId, data, state) {
             }
             await sendToErlang(`${data.content}`);
             break;
+        }
             
-        case 'private':
+        case 'private': {
             if (!isAuthenticated) {
                 ws.send(JSON.stringify({ type: 'error', content: 'Authentication required' }));
                 return;
@@ -737,8 +742,9 @@ async function handleMessage(ws, connectionId, data, state) {
             await sendToErlang(`/msg ${data.to_user} ${data.content}`);
             ws.send(JSON.stringify({ type: 'success', content: 'Private message sent' }));
             break;
+        }
             
-        case 'get_rooms':
+        case 'get_rooms': {
             if (!isAuthenticated) {
                 ws.send(JSON.stringify({ type: 'error', content: 'Authentication required' }));
                 return;
@@ -746,8 +752,9 @@ async function handleMessage(ws, connectionId, data, state) {
             const rooms = await sendToErlang(`/rooms`);
             ws.send(JSON.stringify({ type: 'rooms', rooms: parseRoomsList(rooms) }));
             break;
+        }
             
-        case 'get_users':
+        case 'get_users': {
             if (!isAuthenticated) {
                 ws.send(JSON.stringify({ type: 'error', content: 'Authentication required' }));
                 return;
@@ -755,8 +762,9 @@ async function handleMessage(ws, connectionId, data, state) {
             const users = await sendToErlang(`/users`);
             ws.send(JSON.stringify({ type: 'users', users: parseUsersList(users) }));
             break;
+        }
             
-        case 'logout':
+        case 'logout': {
             if (token) {
                 await sendToErlang(`/logout`);
             }
@@ -764,8 +772,9 @@ async function handleMessage(ws, connectionId, data, state) {
             setRoom(null);
             ws.send(JSON.stringify({ type: 'system', content: 'Logged out' }));
             break;
+        }
             
-        case 'refresh_token':
+        case 'refresh_token': {
             if (!token) {
                 ws.send(JSON.stringify({ type: 'error', content: 'Not authenticated' }));
                 return;
@@ -781,6 +790,7 @@ async function handleMessage(ws, connectionId, data, state) {
                 }));
             }
             break;
+        }
             
         case 'ping':
             ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
@@ -878,7 +888,7 @@ function parseRoomsList(data) {
     const rooms = [];
     const lines = data.split('\n');
     for (const line of lines) {
-        const room = line.replace(/^  - /, '').trim();
+        const room = line.replace(/^ {2}- /, '').trim();
         if (room) rooms.push(room);
     }
     return rooms;
@@ -936,7 +946,7 @@ process.on('uncaughtException', (error) => {
     shutdown('uncaughtException');
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason, _promise) => {
     logger.fatal({ reason }, 'Unhandled rejection');
 });
 

@@ -1,8 +1,15 @@
 package com.monarchs.model;
 
-import jakarta.persistence.*;
 import java.time.Instant;
-import java.util.UUID;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Index;
+import jakarta.persistence.PrePersist;
+import jakarta.persistence.Table;
 
 /**
  * Session entity representing a user session/token.
@@ -59,7 +66,7 @@ public class Session {
     
     // Constructor for creating new sessions
     public Session(String username, String token, int expirySeconds) {
-        this.username = token;
+        this.username = username;
         this.token = token;
         this.createdAt = Instant.now();
         this.expiresAt = this.createdAt.plusSeconds(expirySeconds);

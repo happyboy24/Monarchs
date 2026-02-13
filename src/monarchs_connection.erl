@@ -1,6 +1,8 @@
 -module(monarchs_connection).
 -behaviour(gen_server).
 
+-include("monarchs_records.hrl").
+
 %% API
 -export([start_link/1, start_link/2]).
 
@@ -123,7 +125,7 @@ process_data(Socket, Buffer, State) ->
     end.
 
 %% Handle client commands
-handle_command(<<"/register ", Args/binary>>, State) ->
+handle_command(<<"/register ", Args/binary>>, _State) ->
     case binary:split(Args, <<" ">>) of
         [Username, Password] ->
             UsernameStr = binary_to_list(Username),
@@ -138,13 +140,13 @@ handle_command(<<"/register ", Args/binary>>, State) ->
             {ok, "Usage: /register <username> <password>\nPassword must be at least 8 characters.\n\n"}
     end;
 
-handle_command(<<"/login ", Args/binary>>, State = #state{socket = Socket}) ->
+handle_command(<<"/login ", Args/binary>>, #state{socket = Socket}) ->
     case binary:split(Args, <<" ">>) of
         [Username, Password] ->
             UsernameStr = binary_to_list(Username),
             PasswordStr = binary_to_list(Password),
             case monarchs_server:login(UsernameStr, PasswordStr, Socket) of
-                {ok, Token, Expiry} ->
+                {ok, _Token, Expiry} ->
                     Menu = [
                         "\nLogin successful!\n\n",
                         "Session token expires at: ", integer_to_list(Expiry), "\n\n",
@@ -167,7 +169,7 @@ handle_command(<<"/login ", Args/binary>>, State = #state{socket = Socket}) ->
             {ok, "Usage: /login <username> <password>\n\n"}
     end;
 
-handle_command(<<"/rooms">>, State) ->
+handle_command(<<"/rooms">>, _State) ->
     Rooms = monarchs_server:get_rooms(),
     case Rooms of
         [] ->
@@ -178,9 +180,9 @@ handle_command(<<"/rooms">>, State) ->
             {ok, lists:flatten(Formatted)}
     end;
 
-handle_command(<<"/create ", RoomName/binary>>, State = #state{token = undefined}) ->
+handle_command(<<"/create ", _RoomName/binary>>, _State = #state{token = undefined}) ->
     {ok, "Please login first with /login <username> <password>\n\n"};
-handle_command(<<"/create ", RoomName/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/create ", RoomName/binary>>, _State = #state{token = Token}) ->
     RoomNameStr = binary_to_list(RoomName),
     case monarchs_server:create_room(Token, RoomNameStr) of
         ok ->
@@ -189,9 +191,9 @@ handle_command(<<"/create ", RoomName/binary>>, State = #state{token = Token}) -
             {ok, "Error: " ++ Reason ++ "\n\n"}
     end;
 
-handle_command(<<"/join ", RoomName/binary>>, State = #state{token = undefined}) ->
+handle_command(<<"/join ", _RoomName/binary>>, _State = #state{token = undefined}) ->
     {ok, "Please login first with /login <username> <password>\n\n"};
-handle_command(<<"/join ", RoomName/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/join ", RoomName/binary>>, _State = #state{token = Token}) ->
     RoomNameStr = binary_to_list(RoomName),
     case monarchs_server:join_room(Token, RoomNameStr) of
         ok ->
@@ -200,11 +202,11 @@ handle_command(<<"/join ", RoomName/binary>>, State = #state{token = Token}) ->
             {ok, "Error: " ++ Reason ++ "\n\n"}
     end;
 
-handle_command(<<"/leave">>, State = #state{token = undefined}) ->
+handle_command(<<"/leave">>, _State = #state{token = undefined}) ->
     {ok, "Please login first\n\n"};
-handle_command(<<"/leave">>, State = #state{token = Token, current_room = undefined}) ->
+handle_command(<<"/leave">>, _State = #state{token = _Token, current_room = undefined}) ->
     {ok, "You are not in a room\n\n"};
-handle_command(<<"/leave">>, State = #state{token = Token, current_room = RoomName}) ->
+handle_command(<<"/leave">>, _State = #state{token = Token, current_room = RoomName}) ->
     case monarchs_server:leave_room(Token, RoomName) of
         ok ->
             {ok, "Left room '" ++ RoomName ++ "'\n\n"};
@@ -212,14 +214,14 @@ handle_command(<<"/leave">>, State = #state{token = Token, current_room = RoomNa
             {ok, "Error: " ++ Reason ++ "\n\n"}
     end;
 
-handle_command(<<"/users">>, State) ->
+handle_command(<<"/users">>, _State) ->
     Users = monarchs_server:get_users(),
     Formatted = io_lib:format("Registered users: ~p\n\n", [Users]),
     {ok, Formatted};
 
-handle_command(<<"/msg ", Args/binary>>, State = #state{token = undefined}) ->
+handle_command(<<"/msg ", _Args/binary>>, _State = #state{token = undefined}) ->
     {ok, "Please login first\n\n"};
-handle_command(<<"/msg ", Args/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/msg ", Args/binary>>, _State = #state{token = Token}) ->
     case binary:split(Args, <<" ">>) of
         [ToUser, Message] ->
             ToUserStr = binary_to_list(ToUser),
@@ -230,13 +232,13 @@ handle_command(<<"/msg ", Args/binary>>, State = #state{token = Token}) ->
             {ok, "Usage: /msg <username> <message>\n\n"}
     end;
 
-handle_command(<<"/logout">>, State = #state{token = undefined}) ->
+handle_command(<<"/logout">>, _State = #state{token = undefined}) ->
     {ok, "Not logged in\n\n"};
-handle_command(<<"/logout">>, State = #state{token = Token}) ->
+handle_command(<<"/logout">>, _State = #state{token = Token}) ->
     monarchs_server:logout(Token),
     {ok, "Logged out successfully\n\n"};
 
-handle_command(<<"/help">>, State) ->
+handle_command(<<"/help">>, _State) ->
     HelpMsg = [
         "\n========= HELP =========\n",
         "Commands:\n",
@@ -257,22 +259,18 @@ handle_command(<<"/help">>, State) ->
 
 handle_command(<<"/quit">>, State) ->
     io:format("[CONNECTION] Client requested disconnect~n"),
-    {ok, "Goodbye!\n"},
     gen_tcp:close(State#state.socket),
     {ok, stop};
 
 handle_command(<<>>, _State) ->
     {ok, "> "};
 
-handle_command(<<$/, _/binary>>, _State) ->
-    {ok, "Unknown command. Type /help for available commands\n\n"}.
-
 %% ============================================================================
 %% ADMIN COMMANDS
 %% ============================================================================
 
 %% Register as owner admin (only first admin)
-handle_command(<<"/registeradmin ", Args/binary>>, State) ->
+handle_command(<<"/registeradmin ", Args/binary>>, _State) ->
     case binary:split(Args, <<" ">>) of
         [Username, Password] ->
             UsernameStr = binary_to_list(Username),
@@ -288,7 +286,7 @@ handle_command(<<"/registeradmin ", Args/binary>>, State) ->
     end;
 
 %% Admin help
-handle_command(<<"/adminhelp">>, State = #state{token = Token}) ->
+handle_command(<<"/adminhelp">>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Admin commands require admin login.\n\n"};
@@ -314,7 +312,7 @@ handle_command(<<"/adminhelp">>, State = #state{token = Token}) ->
     end;
 
 %% Promote user
-handle_command(<<"/promote ", Args/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/promote ", Args/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -335,7 +333,7 @@ handle_command(<<"/promote ", Args/binary>>, State = #state{token = Token}) ->
     end;
 
 %% Demote user
-handle_command(<<"/demote ", Username/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/demote ", Username/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -350,7 +348,7 @@ handle_command(<<"/demote ", Username/binary>>, State = #state{token = Token}) -
     end;
 
 %% Ban user
-handle_command(<<"/ban ", Args/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/ban ", Args/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -371,7 +369,7 @@ handle_command(<<"/ban ", Args/binary>>, State = #state{token = Token}) ->
     end;
 
 %% Unban user
-handle_command(<<"/unban ", Username/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/unban ", Username/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -386,7 +384,7 @@ handle_command(<<"/unban ", Username/binary>>, State = #state{token = Token}) ->
     end;
 
 %% Kick user
-handle_command(<<"/kick ", Username/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/kick ", Username/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -401,7 +399,7 @@ handle_command(<<"/kick ", Username/binary>>, State = #state{token = Token}) ->
     end;
 
 %% Get user info
-handle_command(<<"/userinfo ", Username/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/userinfo ", Username/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -430,7 +428,7 @@ handle_command(<<"/userinfo ", Username/binary>>, State = #state{token = Token})
     end;
 
 %% List online users
-handle_command(<<"/onlineusers">>, State = #state{token = Token}) ->
+handle_command(<<"/onlineusers">>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -447,7 +445,7 @@ handle_command(<<"/onlineusers">>, State = #state{token = Token}) ->
     end;
 
 %% List banned users
-handle_command(<<"/bannedusers">>, State = #state{token = Token}) ->
+handle_command(<<"/bannedusers">>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -464,7 +462,7 @@ handle_command(<<"/bannedusers">>, State = #state{token = Token}) ->
     end;
 
 %% Broadcast message
-handle_command(<<"/broadcast ", Message/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/broadcast ", Message/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -475,7 +473,7 @@ handle_command(<<"/broadcast ", Message/binary>>, State = #state{token = Token})
     end;
 
 %% Server stats
-handle_command(<<"/stats">>, State = #state{token = Token}) ->
+handle_command(<<"/stats">>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Admin login required.\n\n"};
@@ -500,7 +498,7 @@ handle_command(<<"/stats">>, State = #state{token = Token}) ->
     end;
 
 %% Shutdown server
-handle_command(<<"/shutdown ", Reason/binary>>, State = #state{token = Token}) ->
+handle_command(<<"/shutdown ", Reason/binary>>, _State = #state{token = Token}) ->
     case is_admin(Token) of
         false ->
             {ok, "Permission denied. Owner login required.\n\n"};
@@ -514,12 +512,15 @@ handle_command(<<"/shutdown ", Reason/binary>>, State = #state{token = Token}) -
             end
     end;
 
+handle_command(<<$/, _/binary>>, _State) ->
+    {ok, "Unknown command. Type /help for available commands\n\n"};
+
 %% Default handlers for non-logged-in users
-handle_command(Message, State = #state{token = undefined}) ->
+handle_command(_Message, _State = #state{token = undefined}) ->
     {ok, "Please login first. Type /help for available commands\n\n"};
-handle_command(Message, State = #state{token = Token, current_room = undefined}) ->
+handle_command(_Message, _State = #state{token = _Token, current_room = undefined}) ->
     {ok, "Join a room first with /join <room_name>\n\n"};
-handle_command(Message, State = #state{token = Token, current_room = RoomName}) ->
+handle_command(Message, _State = #state{token = Token, current_room = RoomName}) ->
     monarchs_server:send_message(Token, RoomName, binary_to_list(Message)),
     {ok, "> "}.
 

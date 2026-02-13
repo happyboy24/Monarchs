@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<coverage generated="1770896431113" clover="3.2.0">
-  <project timestamp="1770896431114" name="All files">
+<coverage generated="1770960122965" clover="3.2.0">
+  <project timestamp="1770960122965" name="All files">
     <metrics statements="401" coveredstatements="0" conditionals="231" coveredconditionals="0" methods="53" coveredmethods="0" elements="685" coveredelements="0" complexity="0" loc="401" ncloc="401" packages="1" files="1" classes="1"/>
     <file name="server.js" path="/home/collins/Documents/Monarchs/server.js">
       <metrics statements="401" coveredstatements="0" conditionals="231" coveredconditionals="0" methods="53" coveredmethods="0"/>
